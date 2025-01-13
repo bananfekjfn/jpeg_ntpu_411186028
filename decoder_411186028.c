@@ -81,35 +81,26 @@ void init_bmp_header(bmp *p_bmp)
     // 檔案總大小 = Header(54) + 像素資料
     int fileSize = (p_bmp->Hbytes * p_bmp->Vpixels) + 54;
     memcpy(&p_bmp->HeaderInfo[2], &fileSize, 4);
-
     // 像素資料起始位移
     int bfOffBits = 54; 
     memcpy(&p_bmp->HeaderInfo[10], &bfOffBits, 4);
-
     // InfoHeader 大小
     int biSize = 40; 
     memcpy(&p_bmp->HeaderInfo[14], &biSize, 4);
-
     // 寬高
     memcpy(&p_bmp->HeaderInfo[18], &p_bmp->Hpixels, 4);
     memcpy(&p_bmp->HeaderInfo[22], &p_bmp->Vpixels, 4);
-
     // planes = 1
     short biPlanes = 1;
     memcpy(&p_bmp->HeaderInfo[26], &biPlanes, 2);
-
-    // bitCount = 24
     short biBitCount = 24;
     memcpy(&p_bmp->HeaderInfo[28], &biBitCount, 2);
-
     // 影像資料大小
     int biSizeImage = p_bmp->Hbytes * p_bmp->Vpixels;
     memcpy(&p_bmp->HeaderInfo[34], &biSizeImage, 4);
-
     // X/Y 方向 DPI (2835 ~ 72 DPI)
     int biXPelsPerMeter = 2835; 
     memcpy(&p_bmp->HeaderInfo[38], &biXPelsPerMeter, 4);
-
     int biYPelsPerMeter = 2835;
     memcpy(&p_bmp->HeaderInfo[42], &biYPelsPerMeter, 4);
 }

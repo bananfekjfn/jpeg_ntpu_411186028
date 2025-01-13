@@ -4,9 +4,7 @@
 #define PI 3.14159265358979
 #include <math.h>
 
-//----------------------------------------------
 // 結構與通用函式
-//----------------------------------------------
 typedef struct _bmp
 {
     int Hpixels; // 圖片寬度
@@ -70,10 +68,7 @@ void free2D_short(short **p, int h)
     }
     free(p);
 }
-
-//----------------------------------------------
 // BMP Header 初始化、儲存與釋放
-//----------------------------------------------
 void init_bmp_header(bmp *p_bmp) 
 {
     // 先全部清 0
@@ -201,10 +196,7 @@ int bmp_free(bmp *p_bmp)
     p_bmp->Hbytes = 0;
     return 1;
 }
-
-//----------------------------------------------
 // 量化表相關
-//----------------------------------------------
 void read_quant_table(const char *fname, int qtable[8][8])
 {
     FILE *fp = fopen(fname, "r");
@@ -220,9 +212,7 @@ void read_quant_table(const char *fname, int qtable[8][8])
     fclose(fp);
 }
 
-//----------------------------------------------
 // IDCT
-//----------------------------------------------
 static void idct_8x8(float inBlock[8][8], float outBlock[8][8])
 {
     const float c0 = 1.0f / (float)sqrt(8.0);
@@ -272,9 +262,7 @@ void do_idct_for_channel(float **Freq, float **spatial, int h, int w)
     }
 }
 
-//----------------------------------------------
 // 以 BT.709 公式做 YCbCr → RGB (函式)
-//----------------------------------------------
 void ycbcr_to_rgb(
     float **Y, float **Cb, float **Cr,
     unsigned char **outR, unsigned char **outG, unsigned char **outB,
@@ -309,9 +297,7 @@ void ycbcr_to_rgb(
     }
 }
 
-//----------------------------------------------
 // 載入 quantized + error 檔案
-//----------------------------------------------
 void load_quantized_short(const char *fname, short **qData, int h, int w)
 {
     FILE *fp = fopen(fname, "rb");

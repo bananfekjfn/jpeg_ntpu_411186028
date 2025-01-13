@@ -81,26 +81,35 @@ void init_bmp_header(bmp *p_bmp)
     // 檔案總大小 = Header(54) + 像素資料
     int fileSize = (p_bmp->Hbytes * p_bmp->Vpixels) + 54;
     memcpy(&p_bmp->HeaderInfo[2], &fileSize, 4);
+
     // 像素資料起始位移
     int bfOffBits = 54; 
     memcpy(&p_bmp->HeaderInfo[10], &bfOffBits, 4);
+
     // InfoHeader 大小
     int biSize = 40; 
     memcpy(&p_bmp->HeaderInfo[14], &biSize, 4);
+
     // 寬高
     memcpy(&p_bmp->HeaderInfo[18], &p_bmp->Hpixels, 4);
     memcpy(&p_bmp->HeaderInfo[22], &p_bmp->Vpixels, 4);
+
     // planes = 1
     short biPlanes = 1;
     memcpy(&p_bmp->HeaderInfo[26], &biPlanes, 2);
+
+    // bitCount = 24
     short biBitCount = 24;
     memcpy(&p_bmp->HeaderInfo[28], &biBitCount, 2);
+
     // 影像資料大小
     int biSizeImage = p_bmp->Hbytes * p_bmp->Vpixels;
     memcpy(&p_bmp->HeaderInfo[34], &biSizeImage, 4);
+
     // X/Y 方向 DPI (2835 ~ 72 DPI)
     int biXPelsPerMeter = 2835; 
     memcpy(&p_bmp->HeaderInfo[38], &biXPelsPerMeter, 4);
+
     int biYPelsPerMeter = 2835;
     memcpy(&p_bmp->HeaderInfo[42], &biYPelsPerMeter, 4);
 }
@@ -358,14 +367,266 @@ void compute_sqnr(
     printf("  B: %.2f dB\n", sqnrB);
 }
 
+static int qtableY[8][8] = {
+    {16, 11, 10, 16, 24,  40,  51,  61},
+    {12, 12, 14, 19, 26,  58,  60,  55},
+    {14, 13, 16, 24, 40,  57,  69,  56},
+    {14, 17, 22, 29, 51,  87,  80,  62},
+    {18, 22, 37, 56, 68, 109, 103,  77},
+    {24, 35, 55, 64, 81, 104, 113,  92},
+    {49, 64, 78, 87,103, 121, 120, 101},
+    {72, 92, 95, 98,112, 100, 103,  99},
+};
+static int qtableCb[8][8] = {
+    {17, 18, 24, 47, 99,  99,  99,  99},
+    {18, 21, 26, 66, 99,  99,  99,  99},
+    {24, 26, 56, 99, 99,  99,  99,  99},
+    {47, 66, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+};
+static int qtableCr[8][8] = {
+    {17, 18, 24, 47, 99,  99,  99,  99},
+    {18, 21, 26, 66, 99,  99,  99,  99},
+    {24, 26, 56, 99, 99,  99,  99,  99},
+    {47, 66, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+    {99, 99, 99, 99, 99,  99,  99,  99},
+};
+
+static const int ZigZagOrder[64] = {
+     0,  1,  5,  6, 14, 15, 27, 28,
+     2,  4,  7, 13, 16, 26, 29, 42,
+     3,  8, 12, 17, 25, 30, 41, 43,
+     9, 11, 18, 24, 31, 40, 44, 53,
+    10, 19, 23, 32, 39, 45, 52, 54,
+    20, 22, 33, 38, 46, 51, 55, 60,
+    21, 34, 37, 47, 50, 56, 59, 61,
+    35, 36, 48, 49, 57, 58, 62, 63
+};
+
+// 從檔案 (ASCII 文字檔) 讀取一個 8x8 block 的 RLE，復原成 block[64] (ZigZag 順序)
+void rle_decode_block_ascii(FILE *fp, short blockZ[64])
+{
+    // 先將 blockZ 清 0
+    for(int i=0; i<64; i++){
+        blockZ[i] = 0;
+    }
+    int count = 0;
+    // 連續讀 tokens，直到填滿 64 筆為止
+    while(count < 64){
+        char token[16];
+        if(fscanf(fp, "%s", token) != 1){
+            // EOF 或 讀取失敗
+            fprintf(stderr, "Error reading RLE block (ASCII)\n");
+            break;
+        }
+        if(strncmp(token, "$skip", 5)==0){
+            int num;
+            fscanf(fp, "%d", &num); // 讀 skip 次數
+            count += num;
+        }
+        else if(strncmp(token, "$value", 6)==0){
+            int val;
+            fscanf(fp, "%d", &val);
+            blockZ[count] = (short)val;
+            count++;
+        }
+        else {
+            continue;
+        }
+        if(count > 64){
+            fprintf(stderr, "Block overflow in ASCII RLE decode!\n");
+            break;
+        }
+    }
+}
+
+
+// 讀取 ASCII RLE -> 還原成三個 channel (qFY, qFCb, qFCr)
+void decode_rle_ascii(FILE *fp, int width, int height, 
+                      short **qFY, short **qFCb, short **qFCr,
+                      int padH, int padW)
+{
+    // 依 encoder 順序：逐個 block 的 Y -> Cb -> Cr
+    // 但檔案裡每個 block 有三行 "(m,n, Y)  $skip.. $value.."
+    //                   "(m,n, Cb) $skip.. $value.."
+    //                   "(m,n, Cr) $skip.. $value.."
+    int mb = padH / 8;
+    int nb = padW / 8;
+
+    // 略過檔案中的第一行 (width height)，因為在 main() 早已讀過
+    // or 如果 main() 還沒讀，那此函式裡也能 fscanf，但要小心指針位置
+
+    // ZigZag array => blockZ
+    short blockZ[64];
+    // 反 ZigZag => block_in
+    short block_in[64];
+
+    // DPCM reconstruction 需要記錄前一個 DC
+    // => 每個 channel 分別記錄
+    short prevDC_Y  = 0;
+    short prevDC_Cb = 0;
+    short prevDC_Cr = 0;
+
+    for(int by=0; by<mb; by++){
+        for(int bx=0; bx<nb; bx++){
+            // =========== Y ============
+            // 先讀 "(by,bx,Y)" + RLE
+            rle_decode_block_ascii(fp, blockZ);
+            // DC reconstruction
+            blockZ[0] = blockZ[0] + prevDC_Y;
+            prevDC_Y  = blockZ[0];
+            // 反 ZigZag => block_in
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            // 放入 qFY
+            int idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFY[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+
+            // =========== Cb ============
+            rle_decode_block_ascii(fp, blockZ);
+            blockZ[0] = blockZ[0] + prevDC_Cb;
+            prevDC_Cb = blockZ[0];
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFCb[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+
+            // =========== Cr ============
+            rle_decode_block_ascii(fp, blockZ);
+            blockZ[0] = blockZ[0] + prevDC_Cr;
+            prevDC_Cr = blockZ[0];
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFCr[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+        }
+    }
+}
+
+// 讀取一個 block (64 筆) 的 RLE (binary)，復原到 blockZ[64]
+void rle_decode_block_binary(FILE *fp, short blockZ[64])
+{
+    for(int i=0; i<64; i++){
+        blockZ[i] = 0;
+    }
+    int count = 0;
+    while(count < 64){
+        unsigned char op;
+        if(fread(&op, 1, 1, fp) != 1){
+            fprintf(stderr, "Binary RLE read fail!\n");
+            break;
+        }
+        short val;
+        if(fread(&val, 2, 1, fp) != 1){
+            fprintf(stderr, "Binary RLE read fail (val)!\n");
+            break;
+        }
+        if(op == 0){
+            // skip
+            count += val;
+        } else {
+            // value
+            blockZ[count] = val;
+            count++;
+        }
+        if(count > 64){
+            fprintf(stderr, "Block overflow in binary RLE decode!\n");
+            break;
+        }
+    }
+}
+void decode_rle_binary(FILE *fp, int width, int height,
+                       short **qFY, short **qFCb, short **qFCr,
+                       int padH, int padW)
+{
+    int mb = padH / 8;
+    int nb = padW / 8;
+
+    // ZigZag
+    short blockZ[64], block_in[64];
+
+    // DPCM
+    short prevDC_Y  = 0;
+    short prevDC_Cb = 0;
+    short prevDC_Cr = 0;
+
+    // 先讀 Y-block 全部
+    for(int by=0; by<mb; by++){
+        for(int bx=0; bx<nb; bx++){
+            rle_decode_block_binary(fp, blockZ);
+            blockZ[0] = blockZ[0] + prevDC_Y;
+            prevDC_Y = blockZ[0];
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            int idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFY[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+        }
+    }
+    // 再讀 Cb-block 全部
+    for(int by=0; by<mb; by++){
+        for(int bx=0; bx<nb; bx++){
+            rle_decode_block_binary(fp, blockZ);
+            blockZ[0] = blockZ[0] + prevDC_Cb;
+            prevDC_Cb = blockZ[0];
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            int idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFCb[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+        }
+    }
+    // 再讀 Cr-block
+    for(int by=0; by<mb; by++){
+        for(int bx=0; bx<nb; bx++){
+            rle_decode_block_binary(fp, blockZ);
+            blockZ[0] = blockZ[0] + prevDC_Cr;
+            prevDC_Cr = blockZ[0];
+            for(int i=0; i<64; i++){
+                block_in[ ZigZagOrder[i] ] = blockZ[i];
+            }
+            int idx=0;
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    qFCr[by*8 + i][bx*8 + j] = block_in[idx++];
+                }
+            }
+        }
+    }
+}
+
 
 int main(int argc, char **argv)
 {
-    if(argc < 7){
-        fprintf(stderr, "\nUsage (mode 0):\n");
-        fprintf(stderr, "  decoder 0 <outputBMP> <R.txt> <G.txt> <B.txt> <dim.txt>\n");
-        return 0;
-    }
 
     int mode = atoi(argv[1]);
     // decoder 0 <outputBMP> <R.txt> <G.txt> <B.txt> <dim.txt>
@@ -784,6 +1045,152 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    
+    else if(mode == 2)
+{
+    // decoder 2 <outputBMP> <ascii|binary> <rle_file>
+    //    => 從 rle_file 讀取 RLE, 還原 Y/Cb/Cr => IDCT => BMP
+    if(argc < 5){
+        fprintf(stderr, "Usage: decoder 2 <outputBMP> <ascii|binary> <rle_file>\n");
+        return 0;
+    }
+    char *fn_output_bmp = argv[2];
+    char *fmt_str       = argv[3]; // "ascii" or "binary"
+    char *fn_rle        = argv[4];
+
+    // 1) 打開 RLE 檔
+    FILE *fp_rle = NULL;
+    if(strcmp(fmt_str,"binary")==0){
+        fp_rle = fopen(fn_rle, "rb");
+    } else {
+        fp_rle = fopen(fn_rle, "r");
+    }
+    if(!fp_rle){
+        fprintf(stderr, "Cannot open RLE file: %s\n", fn_rle);
+        return 1;
+    }
+
+    // 2) 先讀取圖像大小 (width, height)
+    int width, height;
+    if(strcmp(fmt_str,"ascii")==0){
+        // ASCII 版: 第一行是 "width height"
+        fscanf(fp_rle, "%d %d", &width, &height);
+    } else {
+        // Binary 版: 開頭 8 bytes = (int)width, (int)height
+        fread(&width,  sizeof(int), 1, fp_rle);
+        fread(&height, sizeof(int), 1, fp_rle);
+    }
+
+    // 3) 計算 padding
+    int padW = getPaddedSize(width);
+    int padH = getPaddedSize(height);
+
+    // 4) 分配 qF (2D short) 給三通道
+    short **qFY  = alloc2D_short(padH, padW);
+    short **qFCb = alloc2D_short(padH, padW);
+    short **qFCr = alloc2D_short(padH, padW);
+
+    // 5) 依 ascii/binary 讀 RLE => 填入 qFY, qFCb, qFCr
+    if(strcmp(fmt_str,"ascii")==0){
+        decode_rle_ascii(fp_rle, width, height, qFY, qFCb, qFCr, padH, padW);
+    } else {
+        decode_rle_binary(fp_rle, width, height, qFY, qFCb, qFCr, padH, padW);
+    }
+    fclose(fp_rle);
+
+    // 6) 反量化 => F[u,v] = qF[u,v] * Qtable
+    //    (跟 encoder 裡的 quant 相反)
+    float **FY  = alloc2D_float(padH, padW);
+    float **FCb = alloc2D_float(padH, padW);
+    float **FCr = alloc2D_float(padH, padW);
+
+    int mb = padH/8, nb = padW/8;
+    for(int by=0; by<mb; by++){
+        for(int bx=0; bx<nb; bx++){
+            for(int i=0; i<8; i++){
+                for(int j=0; j<8; j++){
+                    int row = by*8 + i;
+                    int col = bx*8 + j;
+                    FY[row][col]  = (float)qFY[row][col]  * (float)qtableY[i][j];
+                    FCb[row][col] = (float)qFCb[row][col] * (float)qtableCb[i][j];
+                    FCr[row][col] = (float)qFCr[row][col] * (float)qtableCr[i][j];
+                }
+            }
+        }
+    }
+
+    // 7) IDCT => 得到空間域 Y, Cb, Cr
+    float **spatialY  = alloc2D_float(padH, padW);
+    float **spatialCb = alloc2D_float(padH, padW);
+    float **spatialCr = alloc2D_float(padH, padW);
+
+    do_idct_for_channel(FY,  spatialY,  padH, padW);
+    do_idct_for_channel(FCb, spatialCb, padH, padW);
+    do_idct_for_channel(FCr, spatialCr, padH, padW);
+
+    // 8) 製作 RGB
+    unsigned char **outR = alloc2D_uc(height, width);
+    unsigned char **outG = alloc2D_uc(height, width);
+    unsigned char **outB = alloc2D_uc(height, width);
+
+    // 只取 [0..height-1, 0..width-1]
+    ycbcr_to_rgb(spatialY, spatialCb, spatialCr, outR, outG, outB, height, width);
+
+    // 9) 組裝 BMP
+    bmp myBmp;
+    memset(&myBmp, 0, sizeof(myBmp));
+    myBmp.Hpixels = width;
+    myBmp.Vpixels = height;
+    myBmp.Hbytes  = (width*3 + 3) & (~3);
+    init_bmp_header(&myBmp);
+
+    myBmp.data = alloc2D_uc(height, myBmp.Hbytes);
+    myBmp.R    = alloc2D_uc(height, width);
+    myBmp.G    = alloc2D_uc(height, width);
+    myBmp.B    = alloc2D_uc(height, width);
+
+    // 塞回 R,G,B
+    for(int i=0; i<height; i++){
+        for(int j=0; j<width; j++){
+            myBmp.R[i][j] = outR[i][j];
+            myBmp.G[i][j] = outG[i][j];
+            myBmp.B[i][j] = outB[i][j];
+        }
+    }
+    // data = BGR
+    for(int i=0; i<height; i++){
+        for(int j=0; j<width; j++){
+            myBmp.data[i][3*j + 0] = myBmp.B[i][j];
+            myBmp.data[i][3*j + 1] = myBmp.G[i][j];
+            myBmp.data[i][3*j + 2] = myBmp.R[i][j];
+        }
+        // 填充 padding
+        for(int p=width*3; p<myBmp.Hbytes; p++){
+            myBmp.data[i][p] = 0;
+        }
+    }
+
+    // 10) 寫出 BMP
+    bmp_save_fn(fn_output_bmp, &myBmp);
+
+    // 11) 釋放
+    free2D_short(qFY,  padH);
+    free2D_short(qFCb, padH);
+    free2D_short(qFCr, padH);
+    free2D_float(FY,  padH);
+    free2D_float(FCb, padH);
+    free2D_float(FCr, padH);
+    free2D_float(spatialY,  padH);
+    free2D_float(spatialCb, padH);
+    free2D_float(spatialCr, padH);
+    free2D_uc(outR, height);
+    free2D_uc(outG, height);
+    free2D_uc(outB, height);
+    bmp_free(&myBmp);
+
+    printf("decoder (mode 2) done.");
+}
+    
     else {
         fprintf(stderr, "Unknown mode!\n");
     }

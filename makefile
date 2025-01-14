@@ -17,10 +17,10 @@ DIM_TXT = dim.txt
 all: $(ENCODER_EXE) $(DECODER_EXE)
 
 $(ENCODER_EXE): $(ENCODER_SRC)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< -lm
 
 $(DECODER_EXE): $(DECODER_SRC)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< -lm
 
 demo0: all
 	@echo "Running encoder mode=0..."
